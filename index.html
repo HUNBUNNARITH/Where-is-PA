@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Globe → Cambodia → SWS &amp; PPWS</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@5.6.0/dist/maplibre-gl.css">
+<style>
+  html, body { height: 100%; margin: 0; font-family: system-ui, sans-serif; }
+  #map { position: absolute; inset: 0; }
+  #panel {
+    position: absolute; top: 12px; right: 12px; z-index: 10;
+    background: rgba(255,255,255,.95); padding: 10px 12px; border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0,0,0,.4); width: 220px; font-size: 13px;
+  }
+  #panel button {
+    display: block; width: 100%; margin: 4px 0; padding: 7px;
+    border: 1px solid #2d6a4f; background: #fff; color: #2d6a4f;
+    border-radius: 5px; cursor: pointer; font-size: 13px;
+  }
+  #panel button:hover { background: #2d6a4f; color: #fff; }
+  #step { font-weight: 600; margin-bottom: 4px; }
+  #msg { color: #555; margin-top: 6px; line-height: 1.35; }
+  #fallback { display: none; margin-top: 6px; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<div id="panel">
+  <div id="step">Step 1: Globe</div>
+  <button id="btnWorld">1. World (globe)</button>
+  <button id="btnCambodia">2. Cambodia</button>
+  <button id="btnArea">3. Protected area</button>
+  <button id="btnPlay">▶ Play all steps</button>
+  <div id="msg">Loading boundary…</div>
+  <input type="file" id="fallback" accept=".geojson,.json">
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/maplibre-gl@5.6.0/dist/maplibre-gl.js"></script>
+<script>
+  // ---------- SETTINGS ----------
+  const AREA_FILE      = 'SWS and PPWS Boundary.geojson';  // same folder as this HTML
+  const COUNTRY_FILE   = 'Cambodia_Boundary.geojson';      // same folder as this HTML
+  const COUNTRY_LABEL  = 'CAMBODIA';
+  const COUNTRY_LABEL_POS = [104.9, 12.7];
+  const LABEL_FIELD    = null;   // set to your attribute name, e.g. 'NAME'. null = auto-detect
+  const LABEL_FALLBACK = 'Protected Area';  // used if no name attribute is found
+  // ------------------------------
+
+  const WORLD_VIEW = { center: [105, 15], zoom: 1.4 };
+  const CAMBODIA_BOUNDS = [[102.3, 10.4], [107.7, 14.7]];
+  const FONT = ['Open Sans Semibold'];
+  const $ = id => document.getElementById(id);
+
+  const map = new maplibregl.Map({
+    container: 'map',
+    center: WORLD_VIEW.center,
+    zoom: WORLD_VIEW.zoom,
+    style: {
+      version: 8,
+      projection: { type: 'globe' },
+      glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
+      sources: {
+        imagery: {
+          type: 'raster',
+          tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],
+          tileSize: 256,
+          maxzoom: 19,
+          attribution: 'Imagery &copy; Esri, Maxar, Earthstar Geographics'
+        }
+      },
+      layers: [
+        { id: 'bg', type: 'background', paint: { 'background-color': '#000' } },
+        { id: 'imagery', type: 'raster', source: 'imagery' }
+      ]
+    }
+  });
+  map.addControl(new maplibregl.NavigationControl());
+
+  let areaBounds = null;
+  let pendingArrival = null;
+
+  function setStep(t) { $('step').textContent = t; }
+
+  // Show only one label (or none). Labels start hidden and appear on arrival.
+  function showOnly(id) {
+    ['country-label', 'area-label'].forEach(l => {
+      if (map.getLayer(l)) map.setPaintProperty(l, 'text-opacity', l === id ? 1 : 0);
+    });
+  }
+
+  // Hide labels now, show the chosen one when the camera stops moving
+  function labelOnArrival(id) {
+    showOnly(null);
+    if (pendingArrival) map.off('moveend', pendingArrival);
+    pendingArrival = () => { pendingArrival = null; showOnly(id); };
+    map.once('moveend', pendingArrival);
+  }
+
+  function getBounds(gj) {
+    const b = new maplibregl.LngLatBounds();
+    const geoms = gj.features ? gj.features.map(f => f.geometry) : [gj.geometry || gj];
+    (function walk(c) {
+      if (typeof c[0] === 'number') b.extend(c);
+      else c.forEach(walk);
+    })(geoms.filter(Boolean).map(g => g.coordinates));
+    return b;
+  }
+
+  function detectLabelField(gj) {
+    if (LABEL_FIELD) return LABEL_FIELD;
+    const feats = gj.features || [];
+    const keys = feats.length ? Object.keys(feats[0].properties || {}) : [];
+    const prefer = ['name', 'name_en', 'pa_name', 'paname', 'pa_name_en', 'label', 'site', 'sitename', 'id'];
+    for (const p of prefer) {
+      const hit = keys.find(k => k.toLowerCase() === p);
+      if (hit) return hit;
+    }
+    return keys.find(k => /name/i.test(k)) || null;
+  }
+
+  function addCountry(gj) {
+    map.addSource('country', { type: 'geojson', data: gj });
+    map.addLayer({ id: 'country-line', type: 'line', source: 'country',
+                   paint: { 'line-color': '#ffffff', 'line-width': 2, 'line-dasharray': [3, 2] } });
+    map.addSource('country-label', {
+      type: 'geojson',
+      data: { type: 'Feature', properties: { name: COUNTRY_LABEL },
+              geometry: { type: 'Point', coordinates: COUNTRY_LABEL_POS } }
+    });
+    map.addLayer({
+      id: 'country-label', type: 'symbol', source: 'country-label',
+      layout: { 'text-field': ['get', 'name'], 'text-font': FONT,
+                'text-size': 22, 'text-letter-spacing': 0.25, 'text-allow-overlap': true },
+      paint: { 'text-color': '#ffffff', 'text-halo-color': '#000000', 'text-halo-width': 2,
+               'text-opacity': 0, 'text-opacity-transition': { duration: 500 } }
+    });
+  }
+
+  function addArea(gj) {
+    ['area-label', 'area-line', 'area-fill'].forEach(id => { if (map.getLayer(id)) map.removeLayer(id); });
+    if (map.getSource('area')) map.removeSource('area');
+
+    const field = detectLabelField(gj);
+    (gj.features || []).forEach(f => {
+      f.properties = f.properties || {};
+      f.properties._label = (field && f.properties[field]) ? String(f.properties[field]) : LABEL_FALLBACK;
+    });
+
+    map.addSource('area', { type: 'geojson', data: gj });
+    map.addLayer({ id: 'area-fill', type: 'fill', source: 'area',
+                   paint: { 'fill-color': '#ffd60a', 'fill-opacity': 0.2 } });
+    map.addLayer({ id: 'area-line', type: 'line', source: 'area',
+                   paint: { 'line-color': '#ffd60a', 'line-width': 2.5 } });
+    map.addLayer({
+      id: 'area-label', type: 'symbol', source: 'area',
+      layout: { 'text-field': ['get', '_label'], 'text-font': FONT,
+                'text-size': 18, 'text-allow-overlap': true },
+      paint: { 'text-color': '#ffd60a', 'text-halo-color': '#000000', 'text-halo-width': 2,
+               'text-opacity': 0, 'text-opacity-transition': { duration: 500 } }
+    });
+
+    areaBounds = getBounds(gj);
+    $('msg').textContent = 'Boundary loaded.' + (field ? ' Label field: ' + field : '');
+    $('fallback').style.display = 'none';
+  }
+
+  map.on('click', 'area-fill', e => {
+    const p = e.features[0].properties || {};
+    const rows = Object.entries(p).filter(([k]) => k !== '_label')
+      .map(([k, v]) => `<b>${k}</b>: ${v}`).join('<br>');
+    if (rows) new maplibregl.Popup().setLngLat(e.lngLat).setHTML(rows).addTo(map);
+  });
+
+  function goWorld() {
+    setStep('Step 1: Globe');
+    map.flyTo({ ...WORLD_VIEW, duration: 2000 });
+    labelOnArrival(null);
+  }
+  function goCambodia() {
+    setStep('Step 2: Cambodia');
+    map.fitBounds(CAMBODIA_BOUNDS, { duration: 3000, padding: 20 });
+    labelOnArrival('country-label');
+  }
+  function goArea() {
+    if (!areaBounds) { $('msg').textContent = 'Boundary not loaded yet.'; return; }
+    setStep('Step 3: Protected area (SWS & PPWS)');
+    map.fitBounds(areaBounds, { duration: 3000, padding: 40 });
+    labelOnArrival('area-label');
+  }
+  function playAll() {
+    goWorld();
+    setTimeout(goCambodia, 2500);
+    setTimeout(goArea, 7500);
+  }
+
+  $('btnWorld').onclick = goWorld;
+  $('btnCambodia').onclick = goCambodia;
+  $('btnArea').onclick = goArea;
+  $('btnPlay').onclick = playAll;
+
+  map.on('load', async () => {
+    // Country boundary (same folder)
+    try {
+      const r = await fetch(encodeURI(COUNTRY_FILE));
+      if (!r.ok) throw new Error(r.status);
+      addCountry(await r.json());
+    } catch (e) { console.warn('Country boundary not loaded', e); }
+
+    // Protected area (same folder)
+    try {
+      const r = await fetch(encodeURI(AREA_FILE));
+      if (!r.ok) throw new Error(r.status);
+      addArea(await r.json());
+      setTimeout(playAll, 800);
+    } catch (e) {
+      $('msg').innerHTML = 'Could not read the files automatically. ' +
+        'Open this page with <b>run_map.bat</b>.';
+      $('fallback').style.display = 'block';
+    }
+  });
+
+  // Fallback (protected area only) if the page was opened by double-click
+  $('fallback').addEventListener('change', e => {
+    const f = e.target.files[0];
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try { addArea(JSON.parse(reader.result)); playAll(); }
+      catch { $('msg').textContent = 'Could not read that file as GeoJSON.'; }
+    };
+    reader.readAsText(f);
+  });
+</script>
+</body>
+</html>
