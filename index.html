@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Globe → Cambodia → SWS &amp; PPWS</title>
+<title>Globe → Cambodia → Province → SWS &amp; PPWS</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@5.6.0/dist/maplibre-gl.css">
 <style>
@@ -31,7 +31,8 @@
   <div id="step">Step 1: Globe</div>
   <button id="btnWorld">1. World (globe)</button>
   <button id="btnCambodia">2. Cambodia</button>
-  <button id="btnArea">3. Protected area</button>
+  <button id="btnProvince">3. Province</button>
+  <button id="btnArea">4. Protected area</button>
   <button id="btnPlay">▶ Play all steps</button>
   <div id="msg">Loading boundary…</div>
   <input type="file" id="fallback" accept=".geojson,.json">
@@ -40,18 +41,33 @@
 <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@5.6.0/dist/maplibre-gl.js"></script>
 <script>
   // ---------- SETTINGS ----------
-  const AREA_FILE      = 'SWS and PPWS Boundary.geojson';  // same folder as this HTML
-  const COUNTRY_FILE   = 'Cambodia_Boundary.geojson';      // same folder as this HTML
-  const COUNTRY_LABEL  = 'CAMBODIA';
+  const AREA_FILE       = 'SWS and PPWS Boundary.geojson';  // same folder as this HTML
+  const COUNTRY_FILE    = 'Cambodia_Boundary.geojson';      // same folder as this HTML
+  const PROVINCE_FILE   = 'MDK_Province_Boundary.geojson';  // same folder as this HTML
+  const COUNTRY_LABEL   = 'CAMBODIA';
   const COUNTRY_LABEL_POS = [104.9, 12.7];
-  const LABEL_FIELD    = null;   // set to your attribute name, e.g. 'NAME'. null = auto-detect
-  const LABEL_FALLBACK = 'Protected Area';  // used if no name attribute is found
+  const AREA_LABEL_FIELD     = null;  // e.g. 'NAME'. null = auto-detect
+  const PROVINCE_LABEL_FIELD = null;  // e.g. 'NAME_EN'. null = auto-detect
+  const AREA_LABEL_FALLBACK     = 'Protected Area';
+  const PROVINCE_LABEL_FALLBACK = 'Mondulkiri Province';
+  const KEEP_PREVIOUS = true;  // true: earlier boundaries stay visible once shown
+                               // false: only the current step's boundary is visible
   // ------------------------------
 
   const WORLD_VIEW = { center: [105, 15], zoom: 1.4 };
   const CAMBODIA_BOUNDS = [[102.3, 10.4], [107.7, 14.7]];
   const FONT = ['Open Sans Semibold'];
   const $ = id => document.getElementById(id);
+
+  // Boundary layers per step, with their visible opacity
+  const GROUPS = {
+    country:  { label: 'country-label',  layers: [['country-line',  'line-opacity', 1]] },
+    province: { label: 'province-label', layers: [['province-fill', 'fill-opacity', 0.08],
+                                                   ['province-line', 'line-opacity', 1]] },
+    area:     { label: 'area-label',     layers: [['area-fill',     'fill-opacity', 0.2],
+                                                   ['area-line',     'line-opacity', 1]] }
+  };
+  const ORDER = ['country', 'province', 'area'];
 
   const map = new maplibregl.Map({
     container: 'map',
@@ -79,22 +95,40 @@
   map.addControl(new maplibregl.NavigationControl());
 
   let areaBounds = null;
+  let provinceBounds = null;
   let pendingArrival = null;
 
   function setStep(t) { $('step').textContent = t; }
 
-  // Show only one label (or none). Labels start hidden and appear on arrival.
-  function showOnly(id) {
-    ['country-label', 'area-label'].forEach(l => {
-      if (map.getLayer(l)) map.setPaintProperty(l, 'text-opacity', l === id ? 1 : 0);
+  // Show boundaries of the listed groups, hide the others
+  function setBoundaries(visible) {
+    ORDER.forEach(g => {
+      GROUPS[g].layers.forEach(([id, prop, op]) => {
+        if (map.getLayer(id)) map.setPaintProperty(id, prop, visible.includes(g) ? op : 0);
+      });
     });
   }
 
-  // Hide labels now, show the chosen one when the camera stops moving
-  function labelOnArrival(id) {
-    showOnly(null);
+  // Show only the chosen label (or none)
+  function setLabel(groupName) {
+    ORDER.forEach(g => {
+      const id = GROUPS[g].label;
+      if (map.getLayer(id)) map.setPaintProperty(id, 'text-opacity', g === groupName ? 1 : 0);
+    });
+  }
+
+  // Step n: 0 = world, 1 = country, 2 = province, 3 = area
+  // Before arriving: hide the target and its label. On arrival: fade them in.
+  function arriveAt(n) {
+    const target = n > 0 ? ORDER[n - 1] : null;
+    const before = KEEP_PREVIOUS ? ORDER.slice(0, Math.max(n - 1, 0)) : [];
+    const after  = target ? before.concat(target) : before;
+
+    setBoundaries(before);
+    setLabel(null);
+
     if (pendingArrival) map.off('moveend', pendingArrival);
-    pendingArrival = () => { pendingArrival = null; showOnly(id); };
+    pendingArrival = () => { pendingArrival = null; setBoundaries(after); setLabel(target); };
     map.once('moveend', pendingArrival);
   }
 
@@ -108,11 +142,10 @@
     return b;
   }
 
-  function detectLabelField(gj) {
-    if (LABEL_FIELD) return LABEL_FIELD;
+  function detectLabelField(gj, forced, prefer) {
+    if (forced) return forced;
     const feats = gj.features || [];
     const keys = feats.length ? Object.keys(feats[0].properties || {}) : [];
-    const prefer = ['name', 'name_en', 'pa_name', 'paname', 'pa_name_en', 'label', 'site', 'sitename', 'id'];
     for (const p of prefer) {
       const hit = keys.find(k => k.toLowerCase() === p);
       if (hit) return hit;
@@ -120,45 +153,84 @@
     return keys.find(k => /name/i.test(k)) || null;
   }
 
-  function addCountry(gj) {
-    map.addSource('country', { type: 'geojson', data: gj });
-    map.addLayer({ id: 'country-line', type: 'line', source: 'country',
-                   paint: { 'line-color': '#ffffff', 'line-width': 2, 'line-dasharray': [3, 2] } });
-    map.addSource('country-label', {
-      type: 'geojson',
-      data: { type: 'Feature', properties: { name: COUNTRY_LABEL },
-              geometry: { type: 'Point', coordinates: COUNTRY_LABEL_POS } }
-    });
-    map.addLayer({
-      id: 'country-label', type: 'symbol', source: 'country-label',
-      layout: { 'text-field': ['get', 'name'], 'text-font': FONT,
-                'text-size': 22, 'text-letter-spacing': 0.25, 'text-allow-overlap': true },
-      paint: { 'text-color': '#ffffff', 'text-halo-color': '#000000', 'text-halo-width': 2,
-               'text-opacity': 0, 'text-opacity-transition': { duration: 500 } }
+  function setLabels(gj, field, fallback) {
+    (gj.features || []).forEach(f => {
+      f.properties = f.properties || {};
+      f.properties._label = (field && f.properties[field]) ? String(f.properties[field]) : fallback;
     });
   }
 
-  function addArea(gj) {
-    ['area-label', 'area-line', 'area-fill'].forEach(id => { if (map.getLayer(id)) map.removeLayer(id); });
-    if (map.getSource('area')) map.removeSource('area');
+  function clearLayers(ids, source) {
+    ids.forEach(id => { if (map.getLayer(id)) map.removeLayer(id); });
+    if (map.getSource(source)) map.removeSource(source);
+  }
 
-    const field = detectLabelField(gj);
-    (gj.features || []).forEach(f => {
-      f.properties = f.properties || {};
-      f.properties._label = (field && f.properties[field]) ? String(f.properties[field]) : LABEL_FALLBACK;
+  const FADE = { duration: 600 };
+
+  function addCountry(gj) {
+    clearLayers(['country-line'], 'country');
+    map.addSource('country', { type: 'geojson', data: gj });
+    map.addLayer({ id: 'country-line', type: 'line', source: 'country',
+                   paint: { 'line-color': '#ffffff', 'line-width': 2, 'line-dasharray': [3, 2],
+                            'line-opacity': 0, 'line-opacity-transition': FADE } });
+    if (!map.getSource('country-label')) {
+      map.addSource('country-label', {
+        type: 'geojson',
+        data: { type: 'Feature', properties: { name: COUNTRY_LABEL },
+                geometry: { type: 'Point', coordinates: COUNTRY_LABEL_POS } }
+      });
+      map.addLayer({
+        id: 'country-label', type: 'symbol', source: 'country-label',
+        layout: { 'text-field': ['get', 'name'], 'text-font': FONT,
+                  'text-size': 22, 'text-letter-spacing': 0.25, 'text-allow-overlap': true },
+        paint: { 'text-color': '#ffffff', 'text-halo-color': '#000000', 'text-halo-width': 2,
+                 'text-opacity': 0, 'text-opacity-transition': FADE }
+      });
+    }
+  }
+
+  function addProvince(gj) {
+    clearLayers(['province-label', 'province-line', 'province-fill'], 'province');
+    const field = detectLabelField(gj, PROVINCE_LABEL_FIELD,
+      ['name', 'name_en', 'prov_name', 'province', 'adm1_en', 'adm1_name', 'nameen', 'label']);
+    setLabels(gj, field, PROVINCE_LABEL_FALLBACK);
+
+    map.addSource('province', { type: 'geojson', data: gj });
+    map.addLayer({ id: 'province-fill', type: 'fill', source: 'province',
+                   paint: { 'fill-color': '#00e5ff', 'fill-opacity': 0,
+                            'fill-opacity-transition': FADE } });
+    map.addLayer({ id: 'province-line', type: 'line', source: 'province',
+                   paint: { 'line-color': '#00e5ff', 'line-width': 2.5,
+                            'line-opacity': 0, 'line-opacity-transition': FADE } });
+    map.addLayer({
+      id: 'province-label', type: 'symbol', source: 'province',
+      layout: { 'text-field': ['get', '_label'], 'text-font': FONT,
+                'text-size': 20, 'text-letter-spacing': 0.1, 'text-allow-overlap': true },
+      paint: { 'text-color': '#00e5ff', 'text-halo-color': '#000000', 'text-halo-width': 2,
+               'text-opacity': 0, 'text-opacity-transition': FADE }
     });
+    provinceBounds = getBounds(gj);
+  }
+
+  function addArea(gj) {
+    clearLayers(['area-label', 'area-line', 'area-fill'], 'area');
+    const field = detectLabelField(gj, AREA_LABEL_FIELD,
+      ['name', 'name_en', 'pa_name', 'paname', 'pa_name_en', 'label', 'site', 'sitename', 'id']);
+    setLabels(gj, field, AREA_LABEL_FALLBACK);
 
     map.addSource('area', { type: 'geojson', data: gj });
     map.addLayer({ id: 'area-fill', type: 'fill', source: 'area',
-                   paint: { 'fill-color': '#ffd60a', 'fill-opacity': 0.2 } });
+                   paint: { 'fill-color': '#ffd60a', 'fill-opacity': 0,
+                            'fill-opacity-transition': FADE } });
     map.addLayer({ id: 'area-line', type: 'line', source: 'area',
-                   paint: { 'line-color': '#ffd60a', 'line-width': 2.5 } });
+                   paint: { 'line-color': '#ffd60a', 'line-width': 2.5,
+                            'line-opacity': 0, 'line-opacity-transition': FADE } });
     map.addLayer({
       id: 'area-label', type: 'symbol', source: 'area',
       layout: { 'text-field': ['get', '_label'], 'text-font': FONT,
                 'text-size': 18, 'text-allow-overlap': true },
       paint: { 'text-color': '#ffd60a', 'text-halo-color': '#000000', 'text-halo-width': 2,
-               'text-opacity': 0, 'text-opacity-transition': { duration: 500 } }
+               'text-opacity': 0, 'text-opacity-transition': FADE }
     });
 
     areaBounds = getBounds(gj);
@@ -167,6 +239,7 @@
   }
 
   map.on('click', 'area-fill', e => {
+    if (map.getPaintProperty('area-line', 'line-opacity') === 0) return;  // not shown yet
     const p = e.features[0].properties || {};
     const rows = Object.entries(p).filter(([k]) => k !== '_label')
       .map(([k, v]) => `<b>${k}</b>: ${v}`).join('<br>');
@@ -176,43 +249,49 @@
   function goWorld() {
     setStep('Step 1: Globe');
     map.flyTo({ ...WORLD_VIEW, duration: 2000 });
-    labelOnArrival(null);
+    arriveAt(0);
   }
   function goCambodia() {
     setStep('Step 2: Cambodia');
     map.fitBounds(CAMBODIA_BOUNDS, { duration: 3000, padding: 20 });
-    labelOnArrival('country-label');
+    arriveAt(1);
+  }
+  function goProvince() {
+    if (!provinceBounds) { $('msg').textContent = 'Province boundary not loaded.'; return; }
+    setStep('Step 3: Province');
+    map.fitBounds(provinceBounds, { duration: 3000, padding: 40 });
+    arriveAt(2);
   }
   function goArea() {
     if (!areaBounds) { $('msg').textContent = 'Boundary not loaded yet.'; return; }
-    setStep('Step 3: Protected area (SWS & PPWS)');
+    setStep('Step 4: Protected area (SWS & PPWS)');
     map.fitBounds(areaBounds, { duration: 3000, padding: 40 });
-    labelOnArrival('area-label');
+    arriveAt(3);
   }
   function playAll() {
     goWorld();
     setTimeout(goCambodia, 2500);
-    setTimeout(goArea, 7500);
+    setTimeout(() => provinceBounds ? goProvince() : null, 7500);
+    setTimeout(goArea, provinceBounds ? 12500 : 7500);
   }
 
   $('btnWorld').onclick = goWorld;
   $('btnCambodia').onclick = goCambodia;
+  $('btnProvince').onclick = goProvince;
   $('btnArea').onclick = goArea;
   $('btnPlay').onclick = playAll;
 
-  map.on('load', async () => {
-    // Country boundary (same folder)
-    try {
-      const r = await fetch(encodeURI(COUNTRY_FILE));
-      if (!r.ok) throw new Error(r.status);
-      addCountry(await r.json());
-    } catch (e) { console.warn('Country boundary not loaded', e); }
+  async function load(file, adder) {
+    const r = await fetch(encodeURI(file));
+    if (!r.ok) throw new Error(file + ' ' + r.status);
+    adder(await r.json());
+  }
 
-    // Protected area (same folder)
+  map.on('load', async () => {
+    try { await load(COUNTRY_FILE, addCountry); }   catch (e) { console.warn(e); }
+    try { await load(PROVINCE_FILE, addProvince); } catch (e) { console.warn(e); }
     try {
-      const r = await fetch(encodeURI(AREA_FILE));
-      if (!r.ok) throw new Error(r.status);
-      addArea(await r.json());
+      await load(AREA_FILE, addArea);
       setTimeout(playAll, 800);
     } catch (e) {
       $('msg').innerHTML = 'Could not read the files automatically. ' +
