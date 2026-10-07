@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Globe → Cambodia → Province → SWS &amp; PPWS</title>
+<title>Zoom to protected area</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@5.6.0/dist/maplibre-gl.css">
 <style>
@@ -21,58 +21,60 @@
   #panel button:hover { background: #2d6a4f; color: #fff; }
   #step { font-weight: 600; margin-bottom: 4px; }
   #msg { color: #555; margin-top: 6px; line-height: 1.35; }
-  #fallback { display: none; margin-top: 6px; }
 </style>
 </head>
 <body>
 <div id="map"></div>
 
 <div id="panel">
-  <div id="step">Step 1: Globe</div>
-  <button id="btnWorld">1. World (globe)</button>
-  <button id="btnCambodia">2. Cambodia</button>
-  <button id="btnProvince">3. Province</button>
-  <button id="btnArea">4. Protected area</button>
+  <div id="step">Loading…</div>
+  <div id="buttons"></div>
   <button id="btnPlay">▶ Play all steps</button>
-  <div id="msg">Loading boundary…</div>
-  <input type="file" id="fallback" accept=".geojson,.json">
+  <div id="msg"></div>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@5.6.0/dist/maplibre-gl.js"></script>
 <script>
-  // ---------- SETTINGS ----------
-  const AREA_FILE       = 'SWS and PPWS Boundary.geojson';  // same folder as this HTML
-  const COUNTRY_FILE    = 'Cambodia_Boundary.geojson';      // same folder as this HTML
-  const PROVINCE_FILE   = 'MDK_Province_Boundary.geojson';  // same folder as this HTML
-  const COUNTRY_LABEL   = 'CAMBODIA';
-  const COUNTRY_LABEL_POS = [104.9, 12.7];
-  const AREA_LABEL_FIELD     = null;  // e.g. 'NAME'. null = auto-detect
-  const PROVINCE_LABEL_FIELD = null;  // e.g. 'NAME_EN'. null = auto-detect
-  const AREA_LABEL_FALLBACK     = 'Protected Area';
-  const PROVINCE_LABEL_FALLBACK = 'Mondulkiri Province';
-  const KEEP_PREVIOUS = true;  // true: earlier boundaries stay visible once shown
-                               // false: only the current step's boundary is visible
-  // ------------------------------
+  // =====================================================================
+  //  SETTINGS: to reuse for another case, only edit this STEPS list.
+  //  All files must be in the same folder as this HTML.
+  //  type 'point' / 'polygon'; step with only "view" = just a camera move.
+  //  labelField: attribute name for the label (null = auto-detect)
+  //  labelFallback: label used if no name attribute is found
+  //  label: {text, pos} = fixed label text at a fixed position
+  // =====================================================================
+  const KEEP_PREVIOUS = true;   // true: earlier layers stay visible after their turn
 
-  const WORLD_VIEW = { center: [105, 15], zoom: 1.4 };
-  const CAMBODIA_BOUNDS = [[102.3, 10.4], [107.7, 14.7]];
+  const STEPS = [
+    { id: 'start', title: 'Start location', type: 'point',
+      file: 'Start_Point.geojson', color: '#ff4d6d', zoom: 12,
+      labelField: null, labelFallback: 'Meeet' },
+
+    { id: 'country', title: 'Cambodia', type: 'polygon',
+      file: 'Cambodia_Boundary.geojson', color: '#ffffff', fill: false, dash: true,
+      label: { text: 'CAMBODIA', pos: [104.9, 12.7], size: 22, spacing: 0.25 } },
+
+    { id: 'province', title: 'Province', type: 'polygon',
+      file: 'MDK_Province_Boundary.geojson', color: '#00e5ff', fillOpacity: 0.08,
+      labelField: 'HRName', labelFallback: 'Mondulkiri Province', labelSize: 20 },
+
+    { id: 'area', title: 'Protected area', type: 'polygon',
+      file: 'SWS and PPWS Boundary.geojson', color: '#ffd60a', fillOpacity: 0.2,
+      labelField: null, labelFallback: 'Protected Area', labelSize: 18 }
+  ];
+  // =====================================================================
+
+  const PREFER = ['name', 'name_en', 'pa_name', 'paname', 'pa_name_en', 'prov_name',
+                  'province', 'adm1_en', 'adm1_name', 'nameen', 'label', 'site', 'sitename', 'id'];
   const FONT = ['Open Sans Semibold'];
+  const FADE = { duration: 600 };
   const $ = id => document.getElementById(id);
-
-  // Boundary layers per step, with their visible opacity
-  const GROUPS = {
-    country:  { label: 'country-label',  layers: [['country-line',  'line-opacity', 1]] },
-    province: { label: 'province-label', layers: [['province-fill', 'fill-opacity', 0.08],
-                                                   ['province-line', 'line-opacity', 1]] },
-    area:     { label: 'area-label',     layers: [['area-fill',     'fill-opacity', 0.2],
-                                                   ['area-line',     'line-opacity', 1]] }
-  };
-  const ORDER = ['country', 'province', 'area'];
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
 
   const map = new maplibregl.Map({
     container: 'map',
-    center: WORLD_VIEW.center,
-    zoom: WORLD_VIEW.zoom,
+    center: [105, 15],
+    zoom: 1.4,
     style: {
       version: 8,
       projection: { type: 'globe' },
@@ -94,44 +96,9 @@
   });
   map.addControl(new maplibregl.NavigationControl());
 
-  let areaBounds = null;
-  let provinceBounds = null;
-  let pendingArrival = null;
+  let navToken = 0, runId = 0;
 
-  function setStep(t) { $('step').textContent = t; }
-
-  // Show boundaries of the listed groups, hide the others
-  function setBoundaries(visible) {
-    ORDER.forEach(g => {
-      GROUPS[g].layers.forEach(([id, prop, op]) => {
-        if (map.getLayer(id)) map.setPaintProperty(id, prop, visible.includes(g) ? op : 0);
-      });
-    });
-  }
-
-  // Show only the chosen label (or none)
-  function setLabel(groupName) {
-    ORDER.forEach(g => {
-      const id = GROUPS[g].label;
-      if (map.getLayer(id)) map.setPaintProperty(id, 'text-opacity', g === groupName ? 1 : 0);
-    });
-  }
-
-  // Step n: 0 = world, 1 = country, 2 = province, 3 = area
-  // Before arriving: hide the target and its label. On arrival: fade them in.
-  function arriveAt(n) {
-    const target = n > 0 ? ORDER[n - 1] : null;
-    const before = KEEP_PREVIOUS ? ORDER.slice(0, Math.max(n - 1, 0)) : [];
-    const after  = target ? before.concat(target) : before;
-
-    setBoundaries(before);
-    setLabel(null);
-
-    if (pendingArrival) map.off('moveend', pendingArrival);
-    pendingArrival = () => { pendingArrival = null; setBoundaries(after); setLabel(target); };
-    map.once('moveend', pendingArrival);
-  }
-
+  // ---------- helpers ----------
   function getBounds(gj) {
     const b = new maplibregl.LngLatBounds();
     const geoms = gj.features ? gj.features.map(f => f.geometry) : [gj.geometry || gj];
@@ -142,11 +109,11 @@
     return b;
   }
 
-  function detectLabelField(gj, forced, prefer) {
+  function detectField(gj, forced) {
     if (forced) return forced;
     const feats = gj.features || [];
     const keys = feats.length ? Object.keys(feats[0].properties || {}) : [];
-    for (const p of prefer) {
+    for (const p of PREFER) {
       const hit = keys.find(k => k.toLowerCase() === p);
       if (hit) return hit;
     }
@@ -160,156 +127,158 @@
     });
   }
 
-  function clearLayers(ids, source) {
-    ids.forEach(id => { if (map.getLayer(id)) map.removeLayer(id); });
-    if (map.getSource(source)) map.removeSource(source);
+  // ---------- build layers for one step ----------
+  function addStep(s, gj) {
+    const id = s.id;
+    s.layers = [];
+    const field = detectField(gj, s.labelField);
+    setLabels(gj, field, s.labelFallback || s.title);
+    map.addSource(id, { type: 'geojson', data: gj });
+
+    if (s.type === 'point') {
+      map.addLayer({ id: id + '-pt', type: 'circle', source: id, paint: {
+        'circle-radius': 8, 'circle-color': s.color,
+        'circle-stroke-color': '#ffffff', 'circle-stroke-width': 2,
+        'circle-opacity': 0, 'circle-stroke-opacity': 0,
+        'circle-opacity-transition': FADE, 'circle-stroke-opacity-transition': FADE } });
+      s.layers.push([id + '-pt', 'circle-opacity', 1], [id + '-pt', 'circle-stroke-opacity', 1]);
+      s.clickLayer = id + '-pt';
+      const c = getBounds(gj).getCenter();
+      s.view = { center: [c.lng, c.lat], zoom: s.zoom || 12 };
+    } else {
+      if (s.fill !== false) {
+        map.addLayer({ id: id + '-fill', type: 'fill', source: id, paint: {
+          'fill-color': s.color, 'fill-opacity': 0, 'fill-opacity-transition': FADE } });
+        s.layers.push([id + '-fill', 'fill-opacity', s.fillOpacity ?? 0.15]);
+        s.clickLayer = id + '-fill';
+      }
+      map.addLayer({ id: id + '-line', type: 'line', source: id, paint: {
+        'line-color': s.color, 'line-width': 2.5,
+        ...(s.dash ? { 'line-dasharray': [3, 2] } : {}),
+        'line-opacity': 0, 'line-opacity-transition': FADE } });
+      s.layers.push([id + '-line', 'line-opacity', 1]);
+      s.bounds = getBounds(gj);
+    }
+
+    // label
+    s.labelId = id + '-label';
+    const textPaint = { 'text-color': s.color, 'text-halo-color': '#000000', 'text-halo-width': 2,
+                        'text-opacity': 0, 'text-opacity-transition': FADE };
+    if (s.label) {
+      map.addSource(id + '-lbl', { type: 'geojson', data: { type: 'Feature',
+        properties: { name: s.label.text },
+        geometry: { type: 'Point', coordinates: s.label.pos } } });
+      map.addLayer({ id: s.labelId, type: 'symbol', source: id + '-lbl',
+        layout: { 'text-field': ['get', 'name'], 'text-font': FONT, 'text-size': s.label.size || 20,
+                  'text-letter-spacing': s.label.spacing || 0, 'text-allow-overlap': true },
+        paint: textPaint });
+    } else {
+      map.addLayer({ id: s.labelId, type: 'symbol', source: id,
+        layout: { 'text-field': ['get', '_label'], 'text-font': FONT,
+                  'text-size': s.labelSize || 20, 'text-allow-overlap': true,
+                  ...(s.type === 'point' ? { 'text-anchor': 'top', 'text-offset': [0, 1] } : {}) },
+        paint: textPaint });
+    }
+
+    // click popup (only once the layer has appeared)
+    if (s.clickLayer) {
+      map.on('click', s.clickLayer, e => {
+        if (!s.shown) return;
+        const p = e.features[0].properties || {};
+        const rows = Object.entries(p).filter(([k]) => k !== '_label')
+          .map(([k, v]) => `<b>${k}</b>: ${v}`).join('<br>');
+        if (rows) new maplibregl.Popup().setLngLat(e.lngLat).setHTML(rows).addTo(map);
+      });
+    }
+    s.ok = true;
+    s.fieldUsed = field;
   }
 
-  const FADE = { duration: 600 };
+  // ---------- visibility ----------
+  function render(visibleIds, labelId) {
+    STEPS.forEach(s => {
+      if (!s.layers) return;
+      const on = visibleIds.includes(s.id);
+      s.shown = on;
+      s.layers.forEach(([lid, prop, op]) => map.setPaintProperty(lid, prop, on ? op : 0));
+      map.setPaintProperty(s.labelId, 'text-opacity', s.id === labelId ? 1 : 0);
+    });
+  }
 
-  function addCountry(gj) {
-    clearLayers(['country-line'], 'country');
-    map.addSource('country', { type: 'geojson', data: gj });
-    map.addLayer({ id: 'country-line', type: 'line', source: 'country',
-                   paint: { 'line-color': '#ffffff', 'line-width': 2, 'line-dasharray': [3, 2],
-                            'line-opacity': 0, 'line-opacity-transition': FADE } });
-    if (!map.getSource('country-label')) {
-      map.addSource('country-label', {
-        type: 'geojson',
-        data: { type: 'Feature', properties: { name: COUNTRY_LABEL },
-                geometry: { type: 'Point', coordinates: COUNTRY_LABEL_POS } }
-      });
-      map.addLayer({
-        id: 'country-label', type: 'symbol', source: 'country-label',
-        layout: { 'text-field': ['get', 'name'], 'text-font': FONT,
-                  'text-size': 22, 'text-letter-spacing': 0.25, 'text-allow-overlap': true },
-        paint: { 'text-color': '#ffffff', 'text-halo-color': '#000000', 'text-halo-width': 2,
-                 'text-opacity': 0, 'text-opacity-transition': FADE }
-      });
+  const usable = s => s.view || s.ok;
+
+  // ---------- camera ----------
+  // Hidden until the camera arrives, then it fades in.
+  function goStep(i, instant) {
+    const s = STEPS[i];
+    if (!usable(s)) { $('msg').textContent = s.title + ': file not loaded.'; return Promise.resolve(); }
+    const my = ++navToken;
+    $('step').textContent = `Step ${i + 1}: ${s.title}`;
+
+    const prev = KEEP_PREVIOUS ? STEPS.slice(0, i).map(x => x.id) : [];
+    render(prev, null);
+
+    return new Promise(resolve => {
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        if (my === navToken) render(prev.concat(s.id), s.id);
+        resolve();
+      };
+
+      if (instant) {
+        if (s.view) map.jumpTo(s.view); else map.fitBounds(s.bounds, { duration: 0, padding: 40 });
+        finish();
+        return;
+      }
+      if (s.view) map.flyTo({ ...s.view, duration: 5000 });
+      else map.fitBounds(s.bounds, { duration: 5000, padding: 40 });
+      map.once('moveend', finish);   // registered after the move starts
+      setTimeout(finish, 4000);      // safety net
+    });
+  }
+
+  async function playAll(from = 0) {
+    const run = ++runId;
+    for (let i = from; i < STEPS.length; i++) {
+      if (!usable(STEPS[i])) continue;
+      await goStep(i);
+      if (run !== runId) return;
+      await sleep(1500);
+      if (run !== runId) return;
     }
   }
 
-  function addProvince(gj) {
-    clearLayers(['province-label', 'province-line', 'province-fill'], 'province');
-    const field = detectLabelField(gj, PROVINCE_LABEL_FIELD,
-      ['name', 'name_en', 'prov_name', 'province', 'adm1_en', 'adm1_name', 'nameen', 'label']);
-    setLabels(gj, field, PROVINCE_LABEL_FALLBACK);
-
-    map.addSource('province', { type: 'geojson', data: gj });
-    map.addLayer({ id: 'province-fill', type: 'fill', source: 'province',
-                   paint: { 'fill-color': '#00e5ff', 'fill-opacity': 0,
-                            'fill-opacity-transition': FADE } });
-    map.addLayer({ id: 'province-line', type: 'line', source: 'province',
-                   paint: { 'line-color': '#00e5ff', 'line-width': 2.5,
-                            'line-opacity': 0, 'line-opacity-transition': FADE } });
-    map.addLayer({
-      id: 'province-label', type: 'symbol', source: 'province',
-      layout: { 'text-field': ['get', '_label'], 'text-font': FONT,
-                'text-size': 20, 'text-letter-spacing': 0.1, 'text-allow-overlap': true },
-      paint: { 'text-color': '#00e5ff', 'text-halo-color': '#000000', 'text-halo-width': 2,
-               'text-opacity': 0, 'text-opacity-transition': FADE }
-    });
-    provinceBounds = getBounds(gj);
-  }
-
-  function addArea(gj) {
-    clearLayers(['area-label', 'area-line', 'area-fill'], 'area');
-    const field = detectLabelField(gj, AREA_LABEL_FIELD,
-      ['name', 'name_en', 'pa_name', 'paname', 'pa_name_en', 'label', 'site', 'sitename', 'id']);
-    setLabels(gj, field, AREA_LABEL_FALLBACK);
-
-    map.addSource('area', { type: 'geojson', data: gj });
-    map.addLayer({ id: 'area-fill', type: 'fill', source: 'area',
-                   paint: { 'fill-color': '#ffd60a', 'fill-opacity': 0,
-                            'fill-opacity-transition': FADE } });
-    map.addLayer({ id: 'area-line', type: 'line', source: 'area',
-                   paint: { 'line-color': '#ffd60a', 'line-width': 2.5,
-                            'line-opacity': 0, 'line-opacity-transition': FADE } });
-    map.addLayer({
-      id: 'area-label', type: 'symbol', source: 'area',
-      layout: { 'text-field': ['get', '_label'], 'text-font': FONT,
-                'text-size': 18, 'text-allow-overlap': true },
-      paint: { 'text-color': '#ffd60a', 'text-halo-color': '#000000', 'text-halo-width': 2,
-               'text-opacity': 0, 'text-opacity-transition': FADE }
-    });
-
-    areaBounds = getBounds(gj);
-    $('msg').textContent = 'Boundary loaded.' + (field ? ' Label field: ' + field : '');
-    $('fallback').style.display = 'none';
-  }
-
-  map.on('click', 'area-fill', e => {
-    if (map.getPaintProperty('area-line', 'line-opacity') === 0) return;  // not shown yet
-    const p = e.features[0].properties || {};
-    const rows = Object.entries(p).filter(([k]) => k !== '_label')
-      .map(([k, v]) => `<b>${k}</b>: ${v}`).join('<br>');
-    if (rows) new maplibregl.Popup().setLngLat(e.lngLat).setHTML(rows).addTo(map);
+  // ---------- panel ----------
+  STEPS.forEach((s, i) => {
+    const b = document.createElement('button');
+    b.textContent = `${i + 1}. ${s.title}`;
+    b.onclick = () => { runId++; goStep(i); };
+    $('buttons').appendChild(b);
   });
+  $('btnPlay').onclick = () => playAll(0);
 
-  function goWorld() {
-    setStep('Step 1: Globe');
-    map.flyTo({ ...WORLD_VIEW, duration: 2000 });
-    arriveAt(0);
-  }
-  function goCambodia() {
-    setStep('Step 2: Cambodia');
-    map.fitBounds(CAMBODIA_BOUNDS, { duration: 3000, padding: 20 });
-    arriveAt(1);
-  }
-  function goProvince() {
-    if (!provinceBounds) { $('msg').textContent = 'Province boundary not loaded.'; return; }
-    setStep('Step 3: Province');
-    map.fitBounds(provinceBounds, { duration: 3000, padding: 40 });
-    arriveAt(2);
-  }
-  function goArea() {
-    if (!areaBounds) { $('msg').textContent = 'Boundary not loaded yet.'; return; }
-    setStep('Step 4: Protected area (SWS & PPWS)');
-    map.fitBounds(areaBounds, { duration: 3000, padding: 40 });
-    arriveAt(3);
-  }
-  function playAll() {
-    goWorld();
-    setTimeout(goCambodia, 2500);
-    setTimeout(() => provinceBounds ? goProvince() : null, 7500);
-    setTimeout(goArea, provinceBounds ? 12500 : 7500);
-  }
-
-  $('btnWorld').onclick = goWorld;
-  $('btnCambodia').onclick = goCambodia;
-  $('btnProvince').onclick = goProvince;
-  $('btnArea').onclick = goArea;
-  $('btnPlay').onclick = playAll;
-
-  async function load(file, adder) {
-    const r = await fetch(encodeURI(file));
-    if (!r.ok) throw new Error(file + ' ' + r.status);
-    adder(await r.json());
-  }
-
+  // ---------- load everything ----------
   map.on('load', async () => {
-    try { await load(COUNTRY_FILE, addCountry); }   catch (e) { console.warn(e); }
-    try { await load(PROVINCE_FILE, addProvince); } catch (e) { console.warn(e); }
-    try {
-      await load(AREA_FILE, addArea);
-      setTimeout(playAll, 800);
-    } catch (e) {
-      $('msg').innerHTML = 'Could not read the files automatically. ' +
-        'Open this page with <b>run_map.bat</b>.';
-      $('fallback').style.display = 'block';
+    const failed = [];
+    for (const s of STEPS) {
+      if (!s.file) continue;
+      try {
+        const r = await fetch(encodeURI(s.file));
+        if (!r.ok) throw new Error(r.status);
+        addStep(s, await r.json());
+      } catch (e) { failed.push(s.file); console.warn(s.file, e); }
     }
-  });
-
-  // Fallback (protected area only) if the page was opened by double-click
-  $('fallback').addEventListener('change', e => {
-    const f = e.target.files[0];
-    if (!f) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      try { addArea(JSON.parse(reader.result)); playAll(); }
-      catch { $('msg').textContent = 'Could not read that file as GeoJSON.'; }
-    };
-    reader.readAsText(f);
+    if (failed.length) {
+      $('msg').innerHTML = 'Could not read: ' + failed.join(', ') +
+        '<br>Open this page with <b>run_map.bat</b> and check the file names.';
+    }
+    const first = STEPS.findIndex(usable);
+    if (first < 0) return;
+    await goStep(first, true);     // start right at the first location
+    await sleep(2000);
+    playAll(first + 1);
   });
 </script>
 </body>
