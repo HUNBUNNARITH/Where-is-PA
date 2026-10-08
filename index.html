@@ -36,19 +36,31 @@
 <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@5.6.0/dist/maplibre-gl.js"></script>
 <script>
   // =====================================================================
-  //  SETTINGS: to reuse for another case, only edit this STEPS list.
-  //  All files must be in the same folder as this HTML.
-  //  type 'point' / 'polygon'; step with only "view" = just a camera move.
-  //  labelField: attribute name for the label (null = auto-detect)
-  //  labelFallback: label used if no name attribute is found
-  //  label: {text, pos} = fixed label text at a fixed position
+  //  SETTINGS
   // =====================================================================
-  const KEEP_PREVIOUS = true;   // true: earlier layers stay visible after their turn
+  const FLY_MS   = 3000;   // movement time per step (milliseconds)
+  const PAUSE_MS = 1500;   // pause after arriving, before the next step
+  const START_MS = 2000;   // wait on the first step before moving
+  const KEEP_PREVIOUS = true;  // true: earlier layers stay visible after their turn
+                               // (a step with keep:false disappears when you leave it)
 
+  // Edit only this list to reuse the map for another case.
+  // All files must be in the same folder as this HTML.
+  //   view            = camera move only (no file), e.g. the globe
+  //   type            = 'point' or 'polygon'
+  //   labelField      = attribute used for the label (null = auto-detect)
+  //   labelFallback   = label text if no attribute is found
+  //   label           = {text, pos:[lng,lat], size, spacing} fixed custom label
   const STEPS = [
+    { id: 'world1', title: 'World',
+      view: { center: [60, 20], zoom: 1.4 } },
+
     { id: 'start', title: 'Start location', type: 'point',
       file: 'Start_Point.geojson', color: '#ff4d6d', zoom: 12,
       labelField: null, labelFallback: 'Meeet' },
+
+    { id: 'world2', title: 'World',
+      view: { center: [105, 15], zoom: 1.4 } },
 
     { id: 'country', title: 'Cambodia', type: 'polygon',
       file: 'Cambodia_Boundary.geojson', color: '#ffffff', fill: false, dash: true,
@@ -65,16 +77,18 @@
   // =====================================================================
 
   const PREFER = ['name', 'name_en', 'pa_name', 'paname', 'pa_name_en', 'prov_name',
-                  'province', 'adm1_en', 'adm1_name', 'nameen', 'label', 'site', 'sitename', 'id'];
+                  'province', 'adm1_en', 'adm1_name', 'nameen', 'label', 'site', 'sitename'];
   const FONT = ['Open Sans Semibold'];
   const FADE = { duration: 600 };
   const $ = id => document.getElementById(id);
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+  const firstView = (STEPS.find(s => s.view) || {}).view || { center: [105, 15], zoom: 1.4 };
+
   const map = new maplibregl.Map({
     container: 'map',
-    center: [105, 15],
-    zoom: 1.4,
+    center: firstView.center,
+    zoom: firstView.zoom,
     style: {
       version: 8,
       projection: { type: 'globe' },
@@ -160,7 +174,7 @@
       s.bounds = getBounds(gj);
     }
 
-    // label
+    // label (one label point per feature, so the name is not repeated)
     s.labelId = id + '-label';
     const textPaint = { 'text-color': s.color, 'text-halo-color': '#000000', 'text-halo-width': 2,
                         'text-opacity': 0, 'text-opacity-transition': FADE };
@@ -173,7 +187,13 @@
                   'text-letter-spacing': s.label.spacing || 0, 'text-allow-overlap': true },
         paint: textPaint });
     } else {
-      map.addLayer({ id: s.labelId, type: 'symbol', source: id,
+      const labelPts = { type: 'FeatureCollection', features: (gj.features || []).map(f => {
+        const c = getBounds(f).getCenter();
+        return { type: 'Feature', properties: { _label: f.properties._label },
+                 geometry: { type: 'Point', coordinates: [c.lng, c.lat] } };
+      }) };
+      map.addSource(id + '-lbl', { type: 'geojson', data: labelPts });
+      map.addLayer({ id: s.labelId, type: 'symbol', source: id + '-lbl',
         layout: { 'text-field': ['get', '_label'], 'text-font': FONT,
                   'text-size': s.labelSize || 20, 'text-allow-overlap': true,
                   ...(s.type === 'point' ? { 'text-anchor': 'top', 'text-offset': [0, 1] } : {}) },
@@ -191,7 +211,6 @@
       });
     }
     s.ok = true;
-    s.fieldUsed = field;
   }
 
   // ---------- visibility ----------
@@ -208,14 +227,15 @@
   const usable = s => s.view || s.ok;
 
   // ---------- camera ----------
-  // Hidden until the camera arrives, then it fades in.
+  // Layers stay hidden until the camera arrives, then fade in.
   function goStep(i, instant) {
     const s = STEPS[i];
     if (!usable(s)) { $('msg').textContent = s.title + ': file not loaded.'; return Promise.resolve(); }
     const my = ++navToken;
     $('step').textContent = `Step ${i + 1}: ${s.title}`;
 
-    const prev = KEEP_PREVIOUS ? STEPS.slice(0, i).map(x => x.id) : [];
+    const prev = KEEP_PREVIOUS
+      ? STEPS.slice(0, i).filter(x => x.keep !== false).map(x => x.id) : [];
     render(prev, null);
 
     return new Promise(resolve => {
@@ -232,10 +252,10 @@
         finish();
         return;
       }
-      if (s.view) map.flyTo({ ...s.view, duration: 5000 });
-      else map.fitBounds(s.bounds, { duration: 5000, padding: 40 });
-      map.once('moveend', finish);   // registered after the move starts
-      setTimeout(finish, 4000);      // safety net
+      if (s.view) map.flyTo({ ...s.view, duration: FLY_MS });
+      else map.fitBounds(s.bounds, { duration: FLY_MS, padding: 40 });
+      map.once('moveend', finish);
+      setTimeout(finish, FLY_MS + 1000);   // safety net
     });
   }
 
@@ -245,7 +265,7 @@
       if (!usable(STEPS[i])) continue;
       await goStep(i);
       if (run !== runId) return;
-      await sleep(1500);
+      await sleep(PAUSE_MS);
       if (run !== runId) return;
     }
   }
@@ -276,8 +296,8 @@
     }
     const first = STEPS.findIndex(usable);
     if (first < 0) return;
-    await goStep(first, true);     // start right at the first location
-    await sleep(2000);
+    await goStep(first, true);
+    await sleep(START_MS);
     playAll(first + 1);
   });
 </script>
